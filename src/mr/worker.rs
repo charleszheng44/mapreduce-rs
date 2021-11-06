@@ -4,6 +4,7 @@ macro_rules! new_kv {
     };
 }
 
+#[derive(Debug)]
 pub struct KeyValue<T, U> {
     pub key: T,
     pub val: U,
