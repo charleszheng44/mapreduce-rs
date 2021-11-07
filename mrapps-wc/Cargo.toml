@@ -1,18 +1,12 @@
 [package]
-name = "mapreduce-rs"
+name = "mrapps-wc"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "mrsequential"
-path = "src/bin/mrsequential.rs"
-
-[workspace] 
-members = [
-    "mrapps-wc",
-]
+[lib]
+crate-type = ["dylib"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libloading = "0.7"
+mapreduce-rs = { path = "../"}

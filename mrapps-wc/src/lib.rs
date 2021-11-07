@@ -1,16 +1,18 @@
 #![allow(unused)]
-use crate::mr::worker;
+use mapreduce_rs::mr::worker;
 
+#[no_mangle]
 pub fn map(_: String, contents: String) -> Vec<worker::KeyValue<String, u8>> {
     split_to_words(contents)
         .into_iter()
         .fold(vec![], |mut acc, wrd| {
-            acc.push(new_kv!(wrd, 1));
+            acc.push(worker::KeyValue::new(wrd, 1));
             acc
         })
 }
 
-pub fn reduce<T, U>(_: T, values: Vec<U>) -> usize {
+#[no_mangle]
+pub fn reduce(_: &str, values: Vec<u8>) -> usize {
     values.len()
 }
 
