@@ -1,0 +1,37 @@
+syntax = "proto3";
+package mr; 
+
+service Coordinator {
+    rpc AskForJob(Empty) returns (AskForJobReply);
+    rpc ReportJobStatus(ReportJobStatusRequest) returns (Empty); 
+}
+
+message Empty {}
+
+enum JobType {
+    Map = 0;
+    Reduce = 1;
+}
+
+enum JobStatus {
+    JobComplete = 0;
+    JobFailed = 1;
+}
+
+message Job {
+    uint32 id = 1;   
+    JobType job_type = 2;
+    string inp_file = 3;
+    string oup_file = 4;
+}
+
+message AskForJobReply {
+    Job assigned_job = 1;
+    uint32 num_reducer = 2;
+}
+
+message ReportJobStatusRequest {
+    uint32 job_id = 1;
+    JobType job_type = 2;
+    JobStatus status = 3;
+}

@@ -9,3 +9,7 @@ impl<T, U> KeyValue<T, U> {
         KeyValue { key, val }
     }
 }
+
+pub async fn start_worker() -> Result<(), Box<dyn std::error::Error>> {
+    todo!()
+}

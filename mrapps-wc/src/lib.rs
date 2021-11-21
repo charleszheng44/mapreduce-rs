@@ -19,8 +19,7 @@ pub fn reduce(_: &str, values: Vec<u8>) -> usize {
 // split_to_words treats punctuations and whitespaces as the delimiter and
 // split input string into words.
 fn split_to_words(line: String) -> Vec<String> {
-    let mut ret = vec![];
-    let mut word = vec![];
+    let (mut ret, mut word) = (vec![], vec![]);
     for c in line.chars() {
         if c.is_alphabetic() {
             word.push(c);
