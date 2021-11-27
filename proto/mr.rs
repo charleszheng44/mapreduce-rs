@@ -137,11 +137,11 @@ pub mod coordinator_server {
     #[async_trait]
     pub trait Coordinator: Send + Sync + 'static {
         async fn ask_for_job(
-            &mut self,
+            &self,
             request: tonic::Request<super::Empty>,
         ) -> Result<tonic::Response<super::AskForJobReply>, tonic::Status>;
         async fn report_job_status(
-            &mut self,
+            &self,
             request: tonic::Request<super::ReportJobStatusRequest>,
         ) -> Result<tonic::Response<super::Empty>, tonic::Status>;
     }

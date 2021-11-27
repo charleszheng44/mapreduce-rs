@@ -27,6 +27,7 @@ libloading = "0.7"
 tonic = "0.6"
 prost = "0.9"
 tokio = { version = "1.14.0", features = ["full"] }
+async-stream = "0.2"
 
 [build-dependencies]
 tonic-build = "0.6"

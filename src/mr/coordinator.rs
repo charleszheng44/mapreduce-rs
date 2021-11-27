@@ -1,19 +1,24 @@
 #![allow(unused)]
 
+use async_stream;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
-use tonic::{Request, Response, Status};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Mutex, Notify};
+use tonic::{transport::Server, Request, Response, Status};
 
 use mr_types::{
-    coordinator_server::Coordinator, AskForJobReply, Empty, Job, JobStatus, JobType,
-    ReportJobStatusRequest,
+    coordinator_server::{Coordinator, CoordinatorServer},
+    AskForJobReply, Empty, Job, JobStatus, JobType, ReportJobStatusRequest,
 };
-use tokio::sync::{Mutex, Notify};
 
 pub mod mr_types {
     include!("../../proto/mr.rs");
 }
 
+#[derive(Debug)]
 enum WorkloadPhase {
     Mapping,
     Reducing,
@@ -26,11 +31,8 @@ impl Default for WorkloadPhase {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MRCoordinator {
-    lock: Mutex<()>,
-    notifier: Notify,
-
     num_map_jobs: u32,
     num_reduce_jobs: u32,
 
@@ -46,13 +48,22 @@ pub struct MRCoordinator {
     workload_phase: WorkloadPhase,
 }
 
-impl<'a> MRCoordinator {
+#[derive(Debug)]
+pub struct MutexMRCoordinator {
+    locked_coordinator: Mutex<MRCoordinator>,
+    notifier: Notify,
+}
+
+impl MutexMRCoordinator {
     pub fn new(files: Vec<String>, num_reducer: u32) -> Self {
-        MRCoordinator {
-            num_map_jobs: files.len() as u32,
-            num_reduce_jobs: num_reducer,
-            waiting_map_jobs: Self::gen_map_jobs(files),
-            ..Default::default()
+        MutexMRCoordinator {
+            locked_coordinator: Mutex::new(MRCoordinator {
+                num_map_jobs: files.len() as u32,
+                num_reduce_jobs: num_reducer,
+                waiting_map_jobs: Self::gen_map_jobs(files),
+                ..Default::default()
+            }),
+            notifier: Notify::new(),
         }
     }
 
@@ -69,50 +80,74 @@ impl<'a> MRCoordinator {
         ret
     }
 
-    // TODO NOT IMPLEMENT YET
-    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        todo!("NOT IMPLEMENT YET")
+    fn gen_reduce_jobs(num_reducer: u32) -> Vec<Job> {
+        let mut ret = vec![];
+        for i in 0..num_reducer {
+            ret.push(Job {
+                id: i,
+                job_type: JobType::Reduce as i32,
+                inp_file: format!("mr-in-{}", i),
+                oup_file: format!("mr-out-{}", i),
+            })
+        }
+        ret
+    }
+
+    async fn run(
+        addr: SocketAddr,
+        files: Vec<String>,
+        num_reducer: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let coordinator = Self::new(files, num_reducer);
+        let coordinator_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        Server::builder()
+            .add_service(CoordinatorServer::new(coordinator))
+            .serve(coordinator_addr)
+            .await?;
+        Ok(())
     }
 }
 
 #[tonic::async_trait]
-impl Coordinator for MRCoordinator {
+impl Coordinator for MutexMRCoordinator {
     async fn ask_for_job(
-        &mut self,
+        &self,
         _request: Request<Empty>,
     ) -> Result<Response<AskForJobReply>, Status> {
-        let _ = self.lock.lock().await;
+        let mut coordinator = self.locked_coordinator.lock().await;
         let mut reply: AskForJobReply;
 
         loop {
-            reply = match &self.workload_phase {
+            reply = match &coordinator.workload_phase {
                 WorkloadPhase::Mapping => {
-                    if self.waiting_map_jobs.len() == 0 {
+                    if coordinator.waiting_map_jobs.len() == 0 {
                         self.notifier.notified().await;
                         continue;
                     }
 
-                    let assigned_job = self.waiting_map_jobs.remove(0);
-                    self.running_map_jobs
+                    let assigned_job = coordinator.waiting_map_jobs.remove(0);
+                    coordinator
+                        .running_map_jobs
                         .insert(assigned_job.id, assigned_job.clone());
                     AskForJobReply {
                         assigned_job: Some(assigned_job),
-                        num_reducer: self.num_reduce_jobs,
+                        num_reducer: coordinator.num_reduce_jobs,
                     }
                     // TODO what if the job has been timeout?
                 }
 
                 WorkloadPhase::Reducing => {
-                    if self.waiting_reduce_jobs.len() == 0 {
+                    if coordinator.waiting_reduce_jobs.len() == 0 {
                         self.notifier.notified().await;
                         continue;
                     }
-                    let assigned_job = self.waiting_reduce_jobs.remove(0);
-                    self.running_reduce_jobs
+                    let assigned_job = coordinator.waiting_reduce_jobs.remove(0);
+                    coordinator
+                        .running_reduce_jobs
                         .insert(assigned_job.id, assigned_job.clone());
                     AskForJobReply {
                         assigned_job: Some(assigned_job),
-                        num_reducer: self.num_reduce_jobs,
+                        num_reducer: coordinator.num_reduce_jobs,
                     }
                     // TODO what if the job has been timeout?
                 }
@@ -131,10 +166,10 @@ impl Coordinator for MRCoordinator {
     }
 
     async fn report_job_status(
-        &mut self,
+        &self,
         request: Request<ReportJobStatusRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let _ = self.lock.lock().await;
+        let mut coordinator = self.locked_coordinator.lock().await;
         let req_inner = request.into_inner();
         let status = JobStatus::from_i32(req_inner.status).unwrap();
         let job_type = JobType::from_i32(req_inner.job_type).unwrap();
@@ -144,18 +179,18 @@ impl Coordinator for MRCoordinator {
             JobType::Map => {
                 if status == JobStatus::JobComplete {
                     println!("{:?} job({}) has completed", job_type, id);
-                    let job = self.running_map_jobs.remove(&id).unwrap();
-                    self.complete_map_jobs.push(job);
-                    if self.complete_map_jobs.len() == self.num_map_jobs as usize {
+                    let job = coordinator.running_map_jobs.remove(&id).unwrap();
+                    coordinator.complete_map_jobs.push(job);
+                    if coordinator.complete_map_jobs.len() == coordinator.num_map_jobs as usize {
                         // entering the reducing phase
-                        self.workload_phase = WorkloadPhase::Reducing;
+                        coordinator.workload_phase = WorkloadPhase::Reducing;
                         self.notifier.notify_waiters();
                     }
                 } else {
                     // job failed
                     println!("{:?} job({}) has failed", job_type, id);
-                    let job = self.running_map_jobs.remove(&id).unwrap();
-                    self.waiting_map_jobs.push(job);
+                    let job = coordinator.running_map_jobs.remove(&id).unwrap();
+                    coordinator.waiting_map_jobs.push(job);
                     self.notifier.notify_waiters();
                 }
             }
@@ -163,18 +198,20 @@ impl Coordinator for MRCoordinator {
             JobType::Reduce => {
                 if status == JobStatus::JobComplete {
                     println!("{:?} job({}) has completed", job_type, id);
-                    let job = self.running_reduce_jobs.remove(&id).unwrap();
-                    self.complete_reduce_jobs.push(job);
-                    if self.complete_reduce_jobs.len() == self.num_reduce_jobs as usize {
+                    let job = coordinator.running_reduce_jobs.remove(&id).unwrap();
+                    coordinator.complete_reduce_jobs.push(job);
+                    if coordinator.complete_reduce_jobs.len()
+                        == coordinator.num_reduce_jobs as usize
+                    {
                         // workload has completed
-                        self.workload_phase = WorkloadPhase::Complete;
+                        coordinator.workload_phase = WorkloadPhase::Complete;
                         self.notifier.notify_waiters();
                     }
                 } else {
                     // job failed
                     println!("{:?} job({}) has failed", job_type, id);
-                    let job = self.running_reduce_jobs.remove(&id).unwrap();
-                    self.waiting_reduce_jobs.push(job);
+                    let job = coordinator.running_reduce_jobs.remove(&id).unwrap();
+                    coordinator.waiting_reduce_jobs.push(job);
                     self.notifier.notify_waiters();
                 }
             }
