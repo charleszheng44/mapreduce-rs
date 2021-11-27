@@ -93,8 +93,7 @@ impl MutexMRCoordinator {
         ret
     }
 
-    async fn run(
-        addr: SocketAddr,
+    pub async fn run(
         files: Vec<String>,
         num_reducer: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {

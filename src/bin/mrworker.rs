@@ -8,7 +8,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    worker::start_worker().await?;
+    let libpath = std::env::args()
+        .nth(1)
+        .expect("failed to get the library path");
+
+    worker::start_worker(libpath).await?;
     println!("mrworker is running...");
 
     Ok(())
