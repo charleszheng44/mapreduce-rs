@@ -1,4 +1,9 @@
+#![allow(unused)]
 use std::process::Command;
+
+// TODO tonic does not support uds well. a workable example is
+// https://github.com/hyperium/tonic/blob/c62f382e3c6e9c0641decfafb2b8396fe52b6314/examples/src/uds/server.rs#L49
+pub const COORDINATOR_ADDR: &str = "http://127.0.0.1:8080";
 
 /// coordinator_sock cooks up a unique-ish UNIX-domain socket name
 /// in /var/tmp, for the coordinator.

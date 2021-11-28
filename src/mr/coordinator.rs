@@ -9,6 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tonic::{transport::Server, Request, Response, Status};
 
+use crate::util::net as netutil;
 use mr_types::{
     coordinator_server::{Coordinator, CoordinatorServer},
     AskForJobReply, Empty, Job, JobStatus, JobType, ReportJobStatusRequest,
@@ -98,7 +99,7 @@ impl MutexMRCoordinator {
         num_reducer: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let coordinator = Self::new(files, num_reducer);
-        let coordinator_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let coordinator_addr: SocketAddr = netutil::COORDINATOR_ADDR.parse().expect("TODO");
         Server::builder()
             .add_service(CoordinatorServer::new(coordinator))
             .serve(coordinator_addr)
