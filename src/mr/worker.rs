@@ -39,7 +39,8 @@ pub async fn start_worker(libpath: String) -> Result<(), Box<dyn std::error::Err
         mapfunc = lib.get(b"map").unwrap();
         reducefunc = lib.get(b"reduce").unwrap();
 
-        let mut client = CoordinatorClient::connect(netutil::COORDINATOR_ADDR).await?;
+        let dest = format!("http://{}", netutil::COORDINATOR_ADDR);
+        let mut client = CoordinatorClient::connect(dest).await?;
 
         loop {
             let response = client.ask_for_job(Empty {}).await?;
@@ -53,10 +54,14 @@ pub async fn start_worker(libpath: String) -> Result<(), Box<dyn std::error::Err
 
             match JobType::from_i32(job.job_type) {
                 Some(JobType::Map) => {
+                    let id = job.id;
+                    println!("handling map job({})...", id);
                     handle_map_job(&mut client, job, num_reducer, &mapfunc).await?;
+                    println!("successfully handled the map job({})...", id);
                 }
 
                 Some(JobType::Reduce) => {
+                    println!("handling reduce job({})...", job.id);
                     handle_reduce_job(&mut client, job, &reducefunc).await?;
                 }
 
@@ -76,19 +81,29 @@ async fn handle_map_job(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&job.inp_file).expect("");
     let intermediate = mapfunc(job.inp_file.clone(), content);
+
+    // write the intermediate results to the buffer.
+    let mut oup_buf = vec![String::new(); num_reducer as usize];
     for kv in intermediate {
         let reducer = ihash(&kv.key) % (num_reducer as u64);
-        let file_name = format!("mr-inp-{}", reducer);
-        let file = std::fs::OpenOptions::new()
+        let js_string = serde_json::to_string(&kv)?;
+        oup_buf[reducer as usize].push_str(&js_string);
+        oup_buf[reducer as usize].push_str("\n");
+    }
+
+    // flush the buffer to the file.
+    for (i, oup) in oup_buf.iter().enumerate() {
+        let file_name = format!("mr-inp-{}", i);
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
             .open(file_name)
-            .expect("");
+            .expect("TODO");
         let fd = file.as_raw_fd();
         flock(fd, FlockArg::LockExclusive).expect("TODO");
-        serde_json::to_writer(file, &kv)?;
-        flock(fd, FlockArg::Unlock).expect("TODO");
+        file.write(oup.as_bytes())?;
+        drop(file);
     }
 
     let rjs_request = tonic::Request::new(ReportJobStatusRequest {

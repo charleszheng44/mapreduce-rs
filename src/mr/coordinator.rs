@@ -87,7 +87,7 @@ impl MutexMRCoordinator {
             ret.push(Job {
                 id: i,
                 job_type: JobType::Reduce as i32,
-                inp_file: format!("mr-in-{}", i),
+                inp_file: format!("mr-inp-{}", i),
                 oup_file: format!("mr-out-{}", i),
             })
         }
@@ -100,6 +100,7 @@ impl MutexMRCoordinator {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let coordinator = Self::new(files, num_reducer);
         let coordinator_addr: SocketAddr = netutil::COORDINATOR_ADDR.parse().expect("TODO");
+        println!("MAPPING...");
         Server::builder()
             .add_service(CoordinatorServer::new(coordinator))
             .serve(coordinator_addr)
@@ -155,13 +156,13 @@ impl Coordinator for MutexMRCoordinator {
                 default =>
                 // workload is complete
                 {
+                    println!("workload complete, would not assign any job to the worker");
                     AskForJobReply::default()
                 }
             };
 
             break;
         }
-
         Ok(Response::new(reply))
     }
 
@@ -182,7 +183,10 @@ impl Coordinator for MutexMRCoordinator {
                     let job = coordinator.running_map_jobs.remove(&id).unwrap();
                     coordinator.complete_map_jobs.push(job);
                     if coordinator.complete_map_jobs.len() == coordinator.num_map_jobs as usize {
+                        println!("REDUCEING...");
                         // entering the reducing phase
+                        coordinator.waiting_reduce_jobs =
+                            Self::gen_reduce_jobs(coordinator.num_reduce_jobs);
                         coordinator.workload_phase = WorkloadPhase::Reducing;
                         self.notifier.notify_waiters();
                     }
@@ -204,6 +208,7 @@ impl Coordinator for MutexMRCoordinator {
                         == coordinator.num_reduce_jobs as usize
                     {
                         // workload has completed
+                        println!("COMPLETE");
                         coordinator.workload_phase = WorkloadPhase::Complete;
                         self.notifier.notify_waiters();
                     }
