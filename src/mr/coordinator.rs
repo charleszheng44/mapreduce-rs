@@ -115,14 +115,18 @@ impl Coordinator for MutexMRCoordinator {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<AskForJobReply>, Status> {
-        let mut coordinator = self.locked_coordinator.lock().await;
         let mut reply: AskForJobReply;
 
+        println!("worker is asking for job...");
+
         loop {
+            let mut coordinator = self.locked_coordinator.lock().await;
             reply = match &coordinator.workload_phase {
                 WorkloadPhase::Mapping => {
                     if coordinator.waiting_map_jobs.len() == 0 {
+                        drop(coordinator);
                         self.notifier.notified().await;
+                        coordinator = self.locked_coordinator.lock().await;
                         continue;
                     }
 
@@ -139,7 +143,9 @@ impl Coordinator for MutexMRCoordinator {
 
                 WorkloadPhase::Reducing => {
                     if coordinator.waiting_reduce_jobs.len() == 0 {
+                        drop(coordinator);
                         self.notifier.notified().await;
+                        coordinator = self.locked_coordinator.lock().await;
                         continue;
                     }
                     let assigned_job = coordinator.waiting_reduce_jobs.remove(0);
@@ -175,7 +181,7 @@ impl Coordinator for MutexMRCoordinator {
         let status = JobStatus::from_i32(req_inner.status).unwrap();
         let job_type = JobType::from_i32(req_inner.job_type).unwrap();
         let id = req_inner.job_id;
-
+        println!("received report for job {}", req_inner.job_id);
         match job_type {
             JobType::Map => {
                 if status == JobStatus::JobComplete {
@@ -188,6 +194,7 @@ impl Coordinator for MutexMRCoordinator {
                         coordinator.waiting_reduce_jobs =
                             Self::gen_reduce_jobs(coordinator.num_reduce_jobs);
                         coordinator.workload_phase = WorkloadPhase::Reducing;
+                        drop(coordinator);
                         self.notifier.notify_waiters();
                     }
                 } else {
@@ -195,6 +202,7 @@ impl Coordinator for MutexMRCoordinator {
                     println!("{:?} job({}) has failed", job_type, id);
                     let job = coordinator.running_map_jobs.remove(&id).unwrap();
                     coordinator.waiting_map_jobs.push(job);
+                    drop(coordinator);
                     self.notifier.notify_waiters();
                 }
             }
@@ -210,6 +218,7 @@ impl Coordinator for MutexMRCoordinator {
                         // workload has completed
                         println!("COMPLETE");
                         coordinator.workload_phase = WorkloadPhase::Complete;
+                        drop(coordinator);
                         self.notifier.notify_waiters();
                     }
                 } else {
@@ -217,6 +226,7 @@ impl Coordinator for MutexMRCoordinator {
                     println!("{:?} job({}) has failed", job_type, id);
                     let job = coordinator.running_reduce_jobs.remove(&id).unwrap();
                     coordinator.waiting_reduce_jobs.push(job);
+                    drop(coordinator);
                     self.notifier.notify_waiters();
                 }
             }
