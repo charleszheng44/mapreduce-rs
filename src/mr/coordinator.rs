@@ -9,6 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tonic::{transport::Server, Request, Response, Status};
 
+use crate::util::condvar::Condvar;
 use crate::util::net as netutil;
 use mr_types::{
     coordinator_server::{Coordinator, CoordinatorServer},
@@ -52,7 +53,8 @@ pub struct MRCoordinator {
 #[derive(Debug)]
 pub struct MutexMRCoordinator {
     locked_coordinator: Mutex<MRCoordinator>,
-    notifier: Notify,
+    cond: Condvar,
+    // notifier: Notify,
 }
 
 impl MutexMRCoordinator {
@@ -64,7 +66,8 @@ impl MutexMRCoordinator {
                 waiting_map_jobs: Self::gen_map_jobs(files),
                 ..Default::default()
             }),
-            notifier: Notify::new(),
+            cond: Condvar::new(),
+            // notifier: Notify::new(),
         }
     }
 
@@ -124,9 +127,7 @@ impl Coordinator for MutexMRCoordinator {
             reply = match &coordinator.workload_phase {
                 WorkloadPhase::Mapping => {
                     if coordinator.waiting_map_jobs.len() == 0 {
-                        drop(coordinator);
-                        self.notifier.notified().await;
-                        coordinator = self.locked_coordinator.lock().await;
+                        self.cond.wait(coordinator, &self.locked_coordinator).await;
                         continue;
                     }
 
@@ -143,9 +144,7 @@ impl Coordinator for MutexMRCoordinator {
 
                 WorkloadPhase::Reducing => {
                     if coordinator.waiting_reduce_jobs.len() == 0 {
-                        drop(coordinator);
-                        self.notifier.notified().await;
-                        coordinator = self.locked_coordinator.lock().await;
+                        self.cond.wait(coordinator, &self.locked_coordinator).await;
                         continue;
                     }
                     let assigned_job = coordinator.waiting_reduce_jobs.remove(0);
@@ -194,16 +193,14 @@ impl Coordinator for MutexMRCoordinator {
                         coordinator.waiting_reduce_jobs =
                             Self::gen_reduce_jobs(coordinator.num_reduce_jobs);
                         coordinator.workload_phase = WorkloadPhase::Reducing;
-                        drop(coordinator);
-                        self.notifier.notify_waiters();
+                        self.cond.notify_waiters(coordinator);
                     }
                 } else {
                     // job failed
                     println!("{:?} job({}) has failed", job_type, id);
                     let job = coordinator.running_map_jobs.remove(&id).unwrap();
                     coordinator.waiting_map_jobs.push(job);
-                    drop(coordinator);
-                    self.notifier.notify_waiters();
+                    self.cond.notify_waiters(coordinator);
                 }
             }
 
@@ -218,16 +215,14 @@ impl Coordinator for MutexMRCoordinator {
                         // workload has completed
                         println!("COMPLETE");
                         coordinator.workload_phase = WorkloadPhase::Complete;
-                        drop(coordinator);
-                        self.notifier.notify_waiters();
+                        self.cond.notify_waiters(coordinator);
                     }
                 } else {
                     // job failed
                     println!("{:?} job({}) has failed", job_type, id);
                     let job = coordinator.running_reduce_jobs.remove(&id).unwrap();
                     coordinator.waiting_reduce_jobs.push(job);
-                    drop(coordinator);
-                    self.notifier.notify_waiters();
+                    self.cond.notify_waiters(coordinator);
                 }
             }
         };
