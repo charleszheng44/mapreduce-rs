@@ -1,3 +1,4 @@
+// import from the external crates
 use fnv::FnvHasher;
 use libloading::{Library, Symbol};
 use mr_types::{
@@ -5,12 +6,13 @@ use mr_types::{
 };
 use nix::fcntl::{flock, FlockArg};
 use serde::{Deserialize, Serialize};
-
+// import from the std crates
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
-
+// import from the current crate
 use crate::util::net as netutil;
+
 pub mod mr_types {
     include!("../../proto/mr.rs");
 }
@@ -79,7 +81,8 @@ async fn handle_map_job(
     num_reducer: u32,
     mapfunc: &libloading::Symbol<'_, MapFunc>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(&job.inp_file).expect("");
+    let content = std::fs::read_to_string(&job.inp_file)
+        .unwrap_or_else(|_| panic!("failed to read from file {}", job.inp_file));
     let intermediate = mapfunc(job.inp_file.clone(), content);
 
     // write the intermediate results to the buffer.
@@ -98,10 +101,11 @@ async fn handle_map_job(
             .create(true)
             .write(true)
             .append(true)
-            .open(file_name)
-            .expect("TODO");
+            .open(file_name.clone())
+            .unwrap_or_else(|_| panic!("failed to open the file {}", file_name));
         let fd = file.as_raw_fd();
-        flock(fd, FlockArg::LockExclusive).expect("TODO");
+        flock(fd, FlockArg::LockExclusive)
+            .unwrap_or_else(|_| panic!("failed to lock the file {}", file_name));
         file.write(oup.as_bytes())?;
         drop(file);
     }
@@ -126,7 +130,8 @@ async fn handle_reduce_job(
     let mut intermediate = vec![];
     for line in BufReader::new(file).lines() {
         if let Ok(json_str) = line {
-            let kv: KeyValue<String, u8> = serde_json::from_str(&json_str).expect("TODO");
+            let kv: KeyValue<String, u8> = serde_json::from_str(&json_str)
+                .unwrap_or_else(|_| panic!("failed to parse the json string({})", json_str));
             intermediate.push(kv);
         }
     }

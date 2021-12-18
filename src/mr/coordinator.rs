@@ -4,6 +4,7 @@ use async_stream;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use tokio::time;
 
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
@@ -20,6 +21,8 @@ pub mod mr_types {
     include!("../../proto/mr.rs");
 }
 
+static JOB_TIMEOUT: time::Duration = time::Duration::from_secs(10);
+
 #[derive(Debug)]
 enum WorkloadPhase {
     Mapping,
@@ -33,6 +36,12 @@ impl Default for WorkloadPhase {
     }
 }
 
+#[derive(Debug)]
+struct RunningJob {
+    job: Job,
+    start_time: time::Instant,
+}
+
 #[derive(Debug, Default)]
 pub struct MRCoordinator {
     num_map_jobs: u32,
@@ -41,8 +50,8 @@ pub struct MRCoordinator {
     waiting_map_jobs: Vec<Job>,
     waiting_reduce_jobs: Vec<Job>,
 
-    running_map_jobs: HashMap<u32, Job>,
-    running_reduce_jobs: HashMap<u32, Job>,
+    running_map_jobs: HashMap<u32, RunningJob>,
+    running_reduce_jobs: HashMap<u32, RunningJob>,
 
     complete_map_jobs: Vec<Job>,
     complete_reduce_jobs: Vec<Job>,
@@ -52,22 +61,20 @@ pub struct MRCoordinator {
 
 #[derive(Debug)]
 pub struct MutexMRCoordinator {
-    locked_coordinator: Mutex<MRCoordinator>,
+    locked_coordinator: Arc<Mutex<MRCoordinator>>,
     cond: Condvar,
-    // notifier: Notify,
 }
 
 impl MutexMRCoordinator {
     pub fn new(files: Vec<String>, num_reducer: u32) -> Self {
         MutexMRCoordinator {
-            locked_coordinator: Mutex::new(MRCoordinator {
+            locked_coordinator: Arc::new(Mutex::new(MRCoordinator {
                 num_map_jobs: files.len() as u32,
                 num_reduce_jobs: num_reducer,
                 waiting_map_jobs: Self::gen_map_jobs(files),
                 ..Default::default()
-            }),
+            })),
             cond: Condvar::new(),
-            // notifier: Notify::new(),
         }
     }
 
@@ -97,13 +104,40 @@ impl MutexMRCoordinator {
         ret
     }
 
+    async fn reset_timeout_jobs(crdnt_cpy: Arc<Mutex<MRCoordinator>>) {
+        loop {
+            time::sleep(time::Duration::from_secs(2)).await;
+            let mut coordinator = (*crdnt_cpy).lock().await;
+            match &coordinator.workload_phase {
+                WorkloadPhase::Mapping => {
+                    coordinator
+                        .running_map_jobs
+                        .retain(|_, job| job.start_time + JOB_TIMEOUT < time::Instant::now());
+                }
+                WorkloadPhase::Reducing => {
+                    coordinator
+                        .running_reduce_jobs
+                        .retain(|_, job| job.start_time + JOB_TIMEOUT > time::Instant::now());
+                }
+                WorkloadPhase::Complete => return,
+            }
+            drop(coordinator);
+        }
+    }
+
     pub async fn run(
         files: Vec<String>,
         num_reducer: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let coordinator = Self::new(files, num_reducer);
-        let coordinator_addr: SocketAddr = netutil::COORDINATOR_ADDR.parse().expect("TODO");
+        let coordinator_addr: SocketAddr = netutil::COORDINATOR_ADDR
+            .parse()
+            .expect("failed to parse the coordinator's address");
         println!("MAPPING...");
+        let coordinator_cpy = coordinator.locked_coordinator.clone();
+        tokio::spawn(async move {
+            Self::reset_timeout_jobs(coordinator_cpy).await;
+        });
         Server::builder()
             .add_service(CoordinatorServer::new(coordinator))
             .serve(coordinator_addr)
@@ -132,14 +166,17 @@ impl Coordinator for MutexMRCoordinator {
                     }
 
                     let assigned_job = coordinator.waiting_map_jobs.remove(0);
-                    coordinator
-                        .running_map_jobs
-                        .insert(assigned_job.id, assigned_job.clone());
+                    coordinator.running_map_jobs.insert(
+                        assigned_job.id,
+                        RunningJob {
+                            job: assigned_job.clone(),
+                            start_time: time::Instant::now(),
+                        },
+                    );
                     AskForJobReply {
                         assigned_job: Some(assigned_job),
                         num_reducer: coordinator.num_reduce_jobs,
                     }
-                    // TODO what if the job has been timeout?
                 }
 
                 WorkloadPhase::Reducing => {
@@ -148,14 +185,17 @@ impl Coordinator for MutexMRCoordinator {
                         continue;
                     }
                     let assigned_job = coordinator.waiting_reduce_jobs.remove(0);
-                    coordinator
-                        .running_reduce_jobs
-                        .insert(assigned_job.id, assigned_job.clone());
+                    coordinator.running_reduce_jobs.insert(
+                        assigned_job.id,
+                        RunningJob {
+                            job: assigned_job.clone(),
+                            start_time: time::Instant::now(),
+                        },
+                    );
                     AskForJobReply {
                         assigned_job: Some(assigned_job),
                         num_reducer: coordinator.num_reduce_jobs,
                     }
-                    // TODO what if the job has been timeout?
                 }
 
                 default =>
@@ -185,8 +225,8 @@ impl Coordinator for MutexMRCoordinator {
             JobType::Map => {
                 if status == JobStatus::JobComplete {
                     println!("{:?} job({}) has completed", job_type, id);
-                    let job = coordinator.running_map_jobs.remove(&id).unwrap();
-                    coordinator.complete_map_jobs.push(job);
+                    let job_info = coordinator.running_map_jobs.remove(&id).unwrap();
+                    coordinator.complete_map_jobs.push(job_info.job);
                     if coordinator.complete_map_jobs.len() == coordinator.num_map_jobs as usize {
                         println!("REDUCEING...");
                         // entering the reducing phase
@@ -198,8 +238,8 @@ impl Coordinator for MutexMRCoordinator {
                 } else {
                     // job failed
                     println!("{:?} job({}) has failed", job_type, id);
-                    let job = coordinator.running_map_jobs.remove(&id).unwrap();
-                    coordinator.waiting_map_jobs.push(job);
+                    let job_info = coordinator.running_map_jobs.remove(&id).unwrap();
+                    coordinator.waiting_map_jobs.push(job_info.job);
                     self.cond.notify_waiters(coordinator);
                 }
             }
@@ -207,8 +247,8 @@ impl Coordinator for MutexMRCoordinator {
             JobType::Reduce => {
                 if status == JobStatus::JobComplete {
                     println!("{:?} job({}) has completed", job_type, id);
-                    let job = coordinator.running_reduce_jobs.remove(&id).unwrap();
-                    coordinator.complete_reduce_jobs.push(job);
+                    let job_info = coordinator.running_reduce_jobs.remove(&id).unwrap();
+                    coordinator.complete_reduce_jobs.push(job_info.job);
                     if coordinator.complete_reduce_jobs.len()
                         == coordinator.num_reduce_jobs as usize
                     {
@@ -220,8 +260,8 @@ impl Coordinator for MutexMRCoordinator {
                 } else {
                     // job failed
                     println!("{:?} job({}) has failed", job_type, id);
-                    let job = coordinator.running_reduce_jobs.remove(&id).unwrap();
-                    coordinator.waiting_reduce_jobs.push(job);
+                    let job_info = coordinator.running_reduce_jobs.remove(&id).unwrap();
+                    coordinator.waiting_reduce_jobs.push(job_info.job);
                     self.cond.notify_waiters(coordinator);
                 }
             }
