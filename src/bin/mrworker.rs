@@ -1,7 +1,8 @@
+use anyhow::Result;
 use mapreduce_rs::mr::worker;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let args = std::env::args();
     if args.len() < 2 {
         eprintln!("Usage: mrworker xxx.so");

@@ -1,13 +1,14 @@
 #![allow(unused)]
 
-use async_stream;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::time;
 
+use anyhow::Result;
+use async_stream;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
+use tokio::time;
 use tonic::{transport::Server, Request, Response, Status};
 
 use crate::util::condvar::Condvar;
@@ -105,19 +106,28 @@ impl MutexMRCoordinator {
     }
 
     async fn reset_timeout_jobs(crdnt_cpy: Arc<Mutex<MRCoordinator>>) {
+        println!("start the running jobs checker...");
         loop {
             time::sleep(time::Duration::from_secs(2)).await;
             let mut coordinator = (*crdnt_cpy).lock().await;
             match &coordinator.workload_phase {
                 WorkloadPhase::Mapping => {
-                    coordinator
-                        .running_map_jobs
-                        .retain(|_, job| job.start_time + JOB_TIMEOUT < time::Instant::now());
+                    coordinator.running_map_jobs.retain(|job_id, job| {
+                        if job.start_time + JOB_TIMEOUT > time::Instant::now() {
+                            return true;
+                        }
+                        println!("running map job {} timeout", job_id);
+                        false
+                    });
                 }
                 WorkloadPhase::Reducing => {
-                    coordinator
-                        .running_reduce_jobs
-                        .retain(|_, job| job.start_time + JOB_TIMEOUT > time::Instant::now());
+                    coordinator.running_reduce_jobs.retain(|job_id, job| {
+                        if job.start_time + JOB_TIMEOUT > time::Instant::now() {
+                            return true;
+                        }
+                        println!("running reduce job {} timeout", job_id);
+                        false
+                    });
                 }
                 WorkloadPhase::Complete => return,
             }
@@ -125,10 +135,7 @@ impl MutexMRCoordinator {
         }
     }
 
-    pub async fn run(
-        files: Vec<String>,
-        num_reducer: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(files: Vec<String>, num_reducer: u32) -> Result<()> {
         let coordinator = Self::new(files, num_reducer);
         let coordinator_addr: SocketAddr = netutil::COORDINATOR_ADDR
             .parse()

@@ -1,4 +1,3 @@
-#![allow(unused)]
 use mapreduce_rs::mr::worker;
 
 #[no_mangle]

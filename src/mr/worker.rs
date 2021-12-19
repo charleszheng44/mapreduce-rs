@@ -1,4 +1,5 @@
 // import from the external crates
+use anyhow::Result;
 use fnv::FnvHasher;
 use libloading::{Library, Symbol};
 use mr_types::{
@@ -32,7 +33,7 @@ impl<T, U> KeyValue<T, U> {
 type MapFunc = fn(String, String) -> Vec<KeyValue<String, u8>>;
 type ReduceFunc = fn(&str, Vec<u8>) -> usize;
 
-pub async fn start_worker(libpath: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_worker(libpath: String) -> Result<()> {
     let mapfunc: Symbol<MapFunc>;
     let reducefunc: Symbol<ReduceFunc>;
 
@@ -80,7 +81,7 @@ async fn handle_map_job(
     job: Job,
     num_reducer: u32,
     mapfunc: &libloading::Symbol<'_, MapFunc>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let content = std::fs::read_to_string(&job.inp_file)
         .unwrap_or_else(|_| panic!("failed to read from file {}", job.inp_file));
     let intermediate = mapfunc(job.inp_file.clone(), content);
@@ -124,7 +125,7 @@ async fn handle_reduce_job(
     client: &mut CoordinatorClient<tonic::transport::Channel>,
     job: Job,
     reducefunc: &libloading::Symbol<'_, ReduceFunc>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // read intermediate data
     let file = std::fs::File::open(&job.inp_file)?;
     let mut intermediate = vec![];
@@ -162,7 +163,7 @@ fn collapse(
     oup_file_name: &str,
     intermediate: Vec<KeyValue<String, u8>>,
     reducefunc: &libloading::Symbol<'_, ReduceFunc>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let mut of = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
